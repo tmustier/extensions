@@ -1,3 +1,5 @@
+import { buildSlackAttachmentContextLines } from "./slack-files.js";
+
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
@@ -142,18 +144,9 @@ function extractAttachmentContextLines(attachments: unknown): string[] {
 
 function extractFileContextLines(files: unknown): string[] {
   const lines: string[] = [];
-
-  for (const file of asRecordArray(files)) {
-    const title = asString(file.title) ?? asString(file.name);
-    const prettyType = asString(file.pretty_type) ?? asString(file.filetype);
-    const mode = asString(file.mode);
-
-    const parts = [title, prettyType, mode].filter((part): part is string => Boolean(part));
-    if (parts.length === 0) continue;
-
-    pushContextLine(lines, parts.join(" — "));
+  for (const line of buildSlackAttachmentContextLines(files)) {
+    pushContextLine(lines, line);
   }
-
   return lines;
 }
 

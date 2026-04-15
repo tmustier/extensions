@@ -3,6 +3,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ReactionCommandSettings } from "./reaction-triggers.js";
 import { matchesToolPattern } from "./guardrails.js";
+import {
+  buildSlackAttachmentSummaryLines,
+  normalizeSlackMessageFiles,
+  type SlackMessageFile,
+} from "./slack-files.js";
 
 // ─── Settings ────────────────────────────────────────────
 
@@ -168,6 +173,7 @@ export interface InboxMessage {
   isChannelMention?: boolean;
   brokerInboxId?: number;
   metadata?: Record<string, unknown> | null;
+  files?: SlackMessageFile[];
 }
 
 export interface SqliteJournalModeResult {
@@ -210,13 +216,13 @@ export function formatInboxMessages(
   messages: InboxMessage[],
   userNames: { get(key: string): string | undefined },
 ): string {
-  const lines = messages.map((m) => {
+  const lines = messages.flatMap((m) => {
     const n = userNames.get(m.userId) ?? m.userId;
     const metadataSuffix = formatInboxMetadata(m.metadata);
-    if (m.isChannelMention) {
-      return `[thread ${m.threadTs}] (channel mention in <#${m.channel}>) ${n}: ${m.text}${metadataSuffix}`;
-    }
-    return `[thread ${m.threadTs}] ${n}: ${m.text}${metadataSuffix}`;
+    const messageLine = m.isChannelMention
+      ? `[thread ${m.threadTs}] (channel mention in <#${m.channel}>) ${n}: ${m.text}${metadataSuffix}`
+      : `[thread ${m.threadTs}] ${n}: ${m.text}${metadataSuffix}`;
+    return [messageLine, ...buildSlackAttachmentSummaryLines(normalizeSlackMessageFiles(m.files))];
   });
 
   return `New Slack messages:\n${lines.join("\n")}\n\nACK briefly, do the work, report blockers immediately, report the outcome when done.`;
@@ -555,6 +561,7 @@ export const FORM_METHODS = new Set([
   "conversations.history",
   "conversations.replies",
   "conversations.info",
+  "files.info",
   "apps.connections.open",
 ]);
 

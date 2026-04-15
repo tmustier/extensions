@@ -490,6 +490,32 @@ describe("formatInboxMessages", () => {
     expect(result).toContain('will: Clicked Slack "Approve" (action_id: review.approve).');
     expect(result).toContain('metadata={"kind":"slack_block_action","actionId":"review.approve"');
   });
+
+  it("includes attachment summaries with file ids", () => {
+    const msgs: InboxMessage[] = [
+      {
+        channel: "D123",
+        threadTs: "123.456",
+        userId: "U1",
+        text: "",
+        timestamp: "123.456",
+        files: [
+          {
+            id: "F123",
+            name: "attachment.png",
+            mimetype: "image/png",
+            size: 248 * 1024,
+            permalink: "https://files.example/F123",
+          },
+        ],
+      },
+    ];
+    const result = formatInboxMessages(msgs, names);
+    expect(result).toContain("[thread 123.456] will: ");
+    expect(result).toContain("Attachments:");
+    expect(result).toContain("attachment.png (image/png, 248 KB, file_id=F123)");
+    expect(result).toContain("Permalink: https://files.example/F123");
+  });
 });
 
 describe("isTerminalPinetStandDownMessage", () => {

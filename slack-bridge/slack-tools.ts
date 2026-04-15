@@ -1,4 +1,6 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { InboxMessage } from "./helpers.js";
@@ -50,6 +52,17 @@ import { normalizeReactionName } from "./reaction-triggers.js";
 import { resolveScheduledWakeupFireAt } from "./scheduled-wakeups.js";
 import { performSlackUpload, prepareSlackUpload } from "./slack-upload.js";
 import { TtlCache } from "./ttl-cache.js";
+import {
+  buildSlackAttachmentSummaryLines,
+  formatSlackAttachmentSize,
+  formatSlackReadableMessage,
+  isInlineTextSlackAttachment,
+  normalizeSlackMessageFiles,
+  sanitizeSlackAttachmentFilename,
+  SLACK_ATTACHMENT_DOWNLOAD_MAX_BYTES,
+  SLACK_ATTACHMENT_INLINE_TEXT_MAX_BYTES,
+  type SlackMessageFile,
+} from "./slack-files.js";
 
 export interface SlackToolsThreadContextPort {
   resolveThreadChannel: (threadTs: string | undefined) => Promise<string | null>;
@@ -97,6 +110,7 @@ function buildSlackInboxPromptGuidelines(): string[] {
     "Use slack_export to archive or document a Slack thread as markdown, plain text, or JSON before writing it into docs, canvases, or files.",
     "Use Slack modals when you need structured input, explicit approvals, or multi-step workflows instead of free-form thread replies.",
     "Use slack_presence before pinging reviewers or scheduling follow-ups when timing matters — it tells you whether someone is active, away, or in DND.",
+    "If a Slack message includes attachments with file IDs, use slack_attachment_fetch to download the attachment into a local temp file for inspection or downstream processing.",
     "When uploading from a local path, only files inside the current working directory or the system temp directory are allowed.",
   ];
 }
@@ -358,15 +372,7 @@ export function registerSlackTools(pi: ExtensionAPI, deps: RegisterSlackToolsDep
       ts?: string;
       authorName?: string;
       text?: string;
-      files?: Array<{
-        name?: string;
-        title?: string;
-        mimetype?: string;
-        filetype?: string;
-        permalink?: string;
-        urlPrivate?: string;
-        preview?: string;
-      }>;
+      files?: SlackMessageFile[];
     }>;
   }> {
     const userIds = new Set<string>();
@@ -400,28 +406,11 @@ export function registerSlackTools(pi: ExtensionAPI, deps: RegisterSlackToolsDep
           : typeof message.bot_id === "string"
             ? `bot:${message.bot_id}`
             : "bot";
-      const rawFiles = Array.isArray(message.files)
-        ? (message.files as Array<Record<string, unknown>>)
-        : [];
-
       return {
         ts: typeof message.ts === "string" ? message.ts : undefined,
         authorName,
         text: typeof message.text === "string" ? message.text : "",
-        files: rawFiles.map((file) => ({
-          name: typeof file.name === "string" ? file.name : undefined,
-          title: typeof file.title === "string" ? file.title : undefined,
-          mimetype: typeof file.mimetype === "string" ? file.mimetype : undefined,
-          filetype: typeof file.filetype === "string" ? file.filetype : undefined,
-          permalink: typeof file.permalink === "string" ? file.permalink : undefined,
-          urlPrivate:
-            typeof file.url_private_download === "string"
-              ? file.url_private_download
-              : typeof file.url_private === "string"
-                ? file.url_private
-                : undefined,
-          preview: typeof file.preview === "string" ? file.preview : undefined,
-        })),
+        files: normalizeSlackMessageFiles(message.files),
       };
     });
 
@@ -700,7 +689,10 @@ export function registerSlackTools(pi: ExtensionAPI, deps: RegisterSlackToolsDep
               : message.metadata?.kind
                 ? ` | metadata.kind=${String(message.metadata.kind)}`
                 : "";
-        lines.push(`${prefix} (${message.timestamp}): ${message.text}${metadataSuffix}`);
+        lines.push(
+          `${prefix} (${message.timestamp}): ${message.text || "(no text)"}${metadataSuffix}`,
+        );
+        lines.push(...buildSlackAttachmentSummaryLines(normalizeSlackMessageFiles(message.files)));
       }
 
       return {
@@ -1350,14 +1342,118 @@ export function registerSlackTools(pi: ExtensionAPI, deps: RegisterSlackToolsDep
       for (const message of messages) {
         const userId = message.user as string | undefined;
         const name = userId ? await resolveUser(userId) : "bot";
-        const text = (message.text as string) ?? "";
-        const ts = message.ts as string;
-        lines.push(`[${ts}] ${name}: ${text}`);
+        lines.push(formatSlackReadableMessage(message, name));
       }
 
       return {
         content: [{ type: "text", text: lines.join("\n") || "(no messages)" }],
         details: { count: messages.length },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "slack_attachment_fetch",
+    label: "Slack Attachment Fetch",
+    description: "Download a Slack attachment by file ID into a local temp file.",
+    promptSnippet:
+      "Fetch a Slack attachment by file ID when a Slack message references an uploaded file, image, or audio clip.",
+    parameters: Type.Object({
+      file_id: Type.String({ description: "Slack file ID, e.g. F123ABC456" }),
+    }),
+    async execute(_id, params) {
+      requireToolPolicy("slack_attachment_fetch", undefined, `file_id=${params.file_id}`);
+
+      const infoResponse = await slack("files.info", getBotToken(), { file: params.file_id });
+      const normalizedFile = normalizeSlackMessageFiles([infoResponse.file])[0];
+      if (!normalizedFile) {
+        throw new Error(
+          `Slack files.info did not return attachment metadata for file_id ${params.file_id}.`,
+        );
+      }
+
+      const downloadUrl = normalizedFile.urlPrivate;
+      if (!downloadUrl) {
+        throw new Error(
+          `Slack attachment ${params.file_id} does not expose a downloadable private URL.`,
+        );
+      }
+
+      if (
+        normalizedFile.size != null &&
+        normalizedFile.size > SLACK_ATTACHMENT_DOWNLOAD_MAX_BYTES
+      ) {
+        throw new Error(
+          `Slack attachment ${params.file_id} is ${formatSlackAttachmentSize(normalizedFile.size)} — above the ${formatSlackAttachmentSize(SLACK_ATTACHMENT_DOWNLOAD_MAX_BYTES)} download limit.`,
+        );
+      }
+
+      const downloadResponse = await fetch(downloadUrl, {
+        headers: {
+          Authorization: `Bearer ${getBotToken()}`,
+        },
+      });
+      if (!downloadResponse.ok) {
+        const details = await downloadResponse.text().catch(() => "");
+        throw new Error(
+          `Slack attachment download failed (${downloadResponse.status}${downloadResponse.statusText ? ` ${downloadResponse.statusText}` : ""})${details ? `: ${details}` : ""}`,
+        );
+      }
+
+      const bytes = Buffer.from(await downloadResponse.arrayBuffer());
+      const fetchedFile: SlackMessageFile = {
+        ...normalizedFile,
+        mimetype:
+          normalizedFile.mimetype ??
+          downloadResponse.headers.get("content-type")?.split(";")[0]?.trim() ??
+          undefined,
+        size: normalizedFile.size ?? bytes.byteLength,
+      };
+
+      const tempDir = await mkdtemp(path.join(os.tmpdir(), "pi-slack-attachment-"));
+      const filename = sanitizeSlackAttachmentFilename(params.file_id, fetchedFile);
+      const localPath = path.join(tempDir, filename);
+      await writeFile(localPath, bytes);
+
+      const shouldInlineText =
+        isInlineTextSlackAttachment(fetchedFile) &&
+        bytes.byteLength <= SLACK_ATTACHMENT_INLINE_TEXT_MAX_BYTES;
+      const inlineText = shouldInlineText ? bytes.toString("utf8") : undefined;
+
+      const summaryLines = [
+        `Fetched Slack attachment ${params.file_id}.`,
+        `- Filename: ${filename}`,
+        ...((fetchedFile.prettyType ?? fetchedFile.mimetype ?? fetchedFile.filetype)
+          ? [`- Type: ${fetchedFile.prettyType ?? fetchedFile.mimetype ?? fetchedFile.filetype}`]
+          : []),
+        ...(fetchedFile.size != null
+          ? [`- Size: ${formatSlackAttachmentSize(fetchedFile.size)}`]
+          : []),
+        ...(fetchedFile.permalink ? [`- Permalink: ${fetchedFile.permalink}`] : []),
+        `- Local path: ${localPath}`,
+      ];
+
+      if (inlineText !== undefined) {
+        summaryLines.push(
+          "",
+          "Inline content:",
+          inlineText.length > 0 ? inlineText : "(empty file)",
+        );
+      }
+
+      return {
+        content: [{ type: "text", text: summaryLines.join("\n") }],
+        details: {
+          file_id: params.file_id,
+          filename,
+          mimetype: fetchedFile.mimetype,
+          filetype: fetchedFile.filetype,
+          pretty_type: fetchedFile.prettyType,
+          size: fetchedFile.size,
+          permalink: fetchedFile.permalink,
+          local_path: localPath,
+          inline_text: inlineText,
+        },
       };
     },
   });
@@ -2108,9 +2204,7 @@ export function registerSlackTools(pi: ExtensionAPI, deps: RegisterSlackToolsDep
       for (const message of messages) {
         const userId = message.user as string | undefined;
         const name = userId ? await resolveUser(userId) : "bot";
-        const text = (message.text as string) ?? "";
-        const ts = message.ts as string;
-        lines.push(`[${ts}] ${name}: ${text}`);
+        lines.push(formatSlackReadableMessage(message, name));
       }
 
       return {

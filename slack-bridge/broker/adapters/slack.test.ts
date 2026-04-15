@@ -274,6 +274,33 @@ describe("classifyMessage", () => {
     }
   });
 
+  it("accepts file_share messages and preserves attachment metadata in context", () => {
+    const evt = {
+      type: "message",
+      subtype: "file_share",
+      user: "U1",
+      text: "",
+      channel: "D1",
+      channel_type: "im",
+      ts: "1.1",
+      files: [
+        {
+          id: "F123",
+          name: "attachment.png",
+          mimetype: "image/png",
+          size: 248 * 1024,
+        },
+      ],
+    };
+    const result = classifyMessage(evt, botId, emptyTracked);
+    expect(result.relevant).toBe(true);
+    if (result.relevant) {
+      expect(result.isDM).toBe(true);
+      expect(result.text).toContain("Slack message context:");
+      expect(result.text).toContain("attachment.png — image/png — 248 KB — file_id=F123");
+    }
+  });
+
   it("accepts messages in tracked threads", () => {
     const tracked = new Set(["100.200"]);
     const evt = {

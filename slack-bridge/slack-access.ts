@@ -201,7 +201,11 @@ export function classifyMessage(
   trackedThreadIds: Set<string>,
   isKnownThread?: (threadTs: string) => boolean,
 ): MessageClassification {
-  if (evt.subtype || evt.bot_id) return { relevant: false };
+  const subtype = typeof evt.subtype === "string" ? evt.subtype : undefined;
+  const hasFiles = Array.isArray(evt.files) && evt.files.length > 0;
+  if (evt.bot_id || (subtype && subtype !== "file_share" && !hasFiles)) {
+    return { relevant: false };
+  }
 
   const text = (evt.text as string) ?? "";
   const user = evt.user as string;

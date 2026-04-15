@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSlackTools } from "./slack-tools.js";
 import type { InboxMessage } from "./helpers.js";
@@ -15,6 +16,11 @@ type ToolDefinition = {
 };
 
 describe("registerSlackTools", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
   function setup() {
     const tools = new Map<string, ToolDefinition>();
     const pi = {
@@ -318,6 +324,80 @@ describe("registerSlackTools", () => {
       ts: "123.456",
       limit: 20,
     });
+  });
+
+  it("renders attachment summaries in slack_read output", async () => {
+    const { tools, setConversationsReplies, setResolveThreadChannel, setResolveUser } = setup();
+    setResolveThreadChannel(async () => "C-DB");
+    setResolveUser(async (userId: string) => (userId === "U123" ? "Alice" : userId));
+    setConversationsReplies([
+      {
+        ok: true,
+        messages: [
+          {
+            ts: "123.456",
+            user: "U123",
+            text: "",
+            files: [
+              {
+                id: "F123",
+                name: "attachment.png",
+                mimetype: "image/png",
+                size: 248 * 1024,
+                permalink: "https://files.example/F123",
+              },
+            ],
+          },
+        ],
+      } as SlackResult,
+    ]);
+
+    const response = await tools.get("slack_read")!.execute("tool-3b", { thread_ts: "123.456" });
+
+    expect(response.content?.[0]?.text).toContain("[123.456] Alice: (no text)");
+    expect(response.content?.[0]?.text).toContain(
+      "attachment.png (image/png, 248 KB, file_id=F123)",
+    );
+    expect(response.content?.[0]?.text).toContain("Permalink: https://files.example/F123");
+  });
+
+  it("downloads Slack attachments by file_id and inlines small text files", async () => {
+    const { tools, setFilesInfoResponse } = setup();
+    setFilesInfoResponse({
+      ok: true,
+      file: {
+        id: "F123",
+        name: "notes.txt",
+        filetype: "txt",
+        mimetype: "text/plain",
+        size: 12,
+        url_private_download: "https://files.example/F123/download",
+        permalink: "https://files.example/F123",
+      },
+    } as SlackResult);
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://files.example/F123/download");
+      expect(init?.headers).toEqual({ Authorization: "Bearer xoxb-initial" });
+      return new Response("hello world\n", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
+
+    const response = await tools.get("slack_attachment_fetch")!.execute("tool-3c", {
+      file_id: "F123",
+    });
+
+    const localPath = response.details?.local_path;
+    expect(typeof localPath).toBe("string");
+    expect(response.details?.inline_text).toBe("hello world\n");
+    expect(response.content?.[0]?.text).toContain("Fetched Slack attachment F123.");
+    expect(response.content?.[0]?.text).toContain("Inline content:");
+    if (typeof localPath === "string") {
+      await expect(readFile(localPath, "utf8")).resolves.toBe("hello world\n");
+    }
   });
 
   it("reports presence and dnd status for a single user", async () => {
@@ -764,6 +844,34 @@ describe("registerSlackTools", () => {
         },
       ],
     });
+  });
+
+  it("includes attachment summaries with file ids in slack_inbox output", async () => {
+    const { inbox, tools } = setup();
+    inbox.push({
+      channel: "D123",
+      threadTs: "123.456",
+      userId: "U123",
+      text: "",
+      timestamp: "123.456",
+      files: [
+        {
+          id: "F123",
+          name: "attachment.png",
+          mimetype: "image/png",
+          size: 248 * 1024,
+          permalink: "https://files.example/F123",
+        },
+      ],
+    });
+
+    const response = await tools.get("slack_inbox")!.execute("tool-16b", {});
+
+    expect(response.content?.[0]?.text).toContain("[thread 123.456] U123 (123.456): (no text)");
+    expect(response.content?.[0]?.text).toContain(
+      "attachment.png (image/png, 248 KB, file_id=F123)",
+    );
+    expect(response.content?.[0]?.text).toContain("Permalink: https://files.example/F123");
   });
 
   it("builds block kit templates via slack_blocks_build", async () => {

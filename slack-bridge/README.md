@@ -55,7 +55,7 @@ im:write             pins:read            pins:write
 reactions:read       reactions:write      users:read
 ```
 
-`files:read` is required because Slack exposes canvas comment pagination through `files.info`, even when the target is first validated via canvas-specific APIs.
+`files:read` is required for both canvas comment inspection and Slack attachment retrieval. The bridge uses `files.info` for verified canvas comments and for fetching uploaded Slack files by `file_id`.
 
 ## Configuration
 
@@ -149,7 +149,7 @@ Slack access is now **default-deny** unless you configure one of these explicitl
 | ------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------ |
 | `botToken`                     | **yes**  | Bot User OAuth Token (`xoxb-...`)                                                                                  |
 | `appToken`                     | **yes**  | App-Level Token for Socket Mode (`xapp-...`)                                                                       |
-| `allowedUsers`                 | no       | Slack user IDs that can interact; when unset, access is denied unless `allowAllWorkspaceUsers` is true            |
+| `allowedUsers`                 | no       | Slack user IDs that can interact; when unset, access is denied unless `allowAllWorkspaceUsers` is true             |
 | `allowAllWorkspaceUsers`       | no       | Explicit opt-in for workspace-wide Slack access when you do not want a user allowlist                              |
 | `defaultChannel`               | no       | Default channel for `slack_post_channel`                                                                           |
 | `logChannel`                   | no       | Channel for broker activity logs                                                                                   |
@@ -179,6 +179,8 @@ User opens Pinet in Slack sidebar
 
 Messages queue while the agent is busy. When the agent finishes, it automatically drains the inbox and responds.
 
+File uploads and `file_share` messages are surfaced with attachment metadata, including `file_id`, so the agent can inspect what arrived before calling `slack_attachment_fetch` to download the content.
+
 ### Available tools
 
 | Tool                         | Description                                                                       |
@@ -191,6 +193,7 @@ Messages queue while the agent is busy. When the agent finishes, it automaticall
 | `slack_schedule`             | Schedule a message for later delivery                                             |
 | `slack_post_channel`         | Post to a channel (by name or ID)                                                 |
 | `slack_read_channel`         | Read channel history or a thread in a channel                                     |
+| `slack_attachment_fetch`     | Download a Slack attachment by `file_id` into a local temp file                   |
 | `slack_create_channel`       | Create a new Slack channel                                                        |
 | `slack_project_create`       | Create a project channel + RFC canvas + bot invite in one call                    |
 | `slack_pin`                  | Pin or unpin a message                                                            |

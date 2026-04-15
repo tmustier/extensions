@@ -18,6 +18,7 @@ import {
   type SlackCall,
 } from "./slack-access.js";
 import { isAbortError } from "./helpers.js";
+import { normalizeSlackMessageFiles, summarizeSlackAttachmentLabels } from "./slack-files.js";
 
 export interface SinglePlayerThreadState {
   channelId: string;
@@ -348,6 +349,7 @@ export function createSinglePlayerRuntime(deps: SinglePlayerRuntimeDeps): Single
     if (!classified.relevant) return;
 
     const { threadTs, channel, userId, text, isDM, isChannelMention, messageTs } = classified;
+    const files = normalizeSlackMessageFiles(evt.files);
 
     if (!threads.has(threadTs)) {
       threads.set(threadTs, { channelId: channel, threadTs, userId, source: "slack" });
@@ -382,7 +384,10 @@ export function createSinglePlayerRuntime(deps: SinglePlayerRuntimeDeps): Single
 
     const name = await deps.resolveUser(userId);
     if (shuttingDown) return;
-    ctx.ui.notify(`${name}: ${text.slice(0, 100)}`, "info");
+    const rawText = typeof evt.text === "string" ? evt.text.trim() : "";
+    const notificationText =
+      rawText || summarizeSlackAttachmentLabels(files) || text.trim() || "(no text)";
+    ctx.ui.notify(`${name}: ${notificationText.slice(0, 100)}`, "info");
 
     void deps.addReaction(channel, messageTs, "eyes");
     const pending = deps.getPendingEyes().get(threadTs) ?? [];
@@ -395,6 +400,7 @@ export function createSinglePlayerRuntime(deps: SinglePlayerRuntimeDeps): Single
       userId,
       text: messageText,
       timestamp: messageTs,
+      ...(files.length > 0 ? { files } : {}),
       ...(isChannelMention && { isChannelMention: true }),
     });
     deps.updateBadge();

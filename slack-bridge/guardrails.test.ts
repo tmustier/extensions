@@ -103,6 +103,7 @@ describe("isToolBlocked", () => {
     expect(WRITE_TOOLS.has("slack_modal_open")).toBe(true);
     expect(WRITE_TOOLS.has("slack_modal_push")).toBe(true);
     expect(WRITE_TOOLS.has("slack_modal_update")).toBe(true);
+    expect(READ_ONLY_TOOLS.has("slack_attachment_fetch")).toBe(true);
     expect(READ_ONLY_TOOLS.has("slack_export")).toBe(true);
     expect(READ_ONLY_TOOLS.has("slack_presence")).toBe(true);
     expect(READ_ONLY_TOOLS.has("slack_create_channel")).toBe(false);
